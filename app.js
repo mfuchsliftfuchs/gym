@@ -1,14 +1,17 @@
 import DB from "./exercises.js";
-import { e1rm, lastSets, suggest, series, bestE1rm, movingAvg, TARGET_REPS } from "./logic.js";
+import { e1rm, lastSets, suggest, series, bestE1rm, movingAvg, normalize, TARGET_REPS } from "./logic.js";
 
 // ---------- state ----------
-const KEY = "gym-v1";
-const BLANK = () => ({ plans: [], workouts: [], body: {}, opts: {}, custom: [], lastBackup: 0 });
+const KEY = "gym-v1", UI = "gym-ui";
 let S = load();
-let pickFor = null; // {type: 'plan'|'workout', id}
+for (const w of S.workouts) w.planName ||= S.plans.find((p) => p.id === w.plan)?.name || ""; // older saves lack the name
+// UI state that must survive iOS reloading the app (e.g. after the Shortcuts switch).
+const ui = (() => { try { return JSON.parse(localStorage.getItem(UI)) || {}; } catch { return {}; } })();
+const saveUi = () => { try { localStorage.setItem(UI, JSON.stringify(ui)); } catch {} };
+let pickFor = ui.pickFor || null; // {type: 'plan'|'workout', id}
 
 function load() {
-  try { return { ...BLANK(), ...JSON.parse(localStorage.getItem(KEY)) }; } catch { return BLANK(); }
+  try { return normalize(JSON.parse(localStorage.getItem(KEY))); } catch { return normalize(null); }
 }
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(S)); } catch { toast("Speichern fehlgeschlagen. Exportiere ein Backup."); }
@@ -28,7 +31,8 @@ for (const c of S.custom) MUSCLE[c] = "eigene";
 const name = (ex) => S.opts[ex]?.name || ex;
 const step = (ex) => S.opts[ex]?.step ?? 1;
 const rest = (ex) => S.opts[ex]?.rest ?? 90;
-const planName = (id) => S.plans.find((p) => p.id === id)?.name || "Freies Training";
+// Name stored on the workout, so deleting a plan keeps its history label.
+const wName = (w) => w.planName || S.plans.find((p) => p.id === w.plan)?.name || "Freies Training";
 const finished = () => S.workouts.filter((w) => w.done).sort((a, b) => b.start - a.start);
 const active = () => S.workouts.find((w) => !w.done);
 const setsText = (sets) => sets.map((s) => `${num(s.w)}×${s.r}`).join("  ");
@@ -50,14 +54,14 @@ const views = {
       : `<p class="muted">Lege unter <a href="#/plans">Pläne</a> deinen ersten Plan an, oder starte frei.</p>`;
     const hist = finished().map((w) => {
       const n = w.items.reduce((a, it) => a + it.sets.length, 0);
-      return `<a class="row" href="#/workout/${w.id}"><span>${fmtDay(w.start)}</span><b>${esc(planName(w.plan))}</b><span class="muted">${w.items.length} Übungen, ${n} Sätze</span></a>`;
+      return `<a class="row" href="#/workout/${w.id}"><span>${fmtDay(w.start)}</span><b>${esc(wName(w))}</b><span class="muted">${w.items.length} Übungen, ${n} Sätze</span></a>`;
     }).join("");
     const hasData = S.workouts.length || Object.keys(S.body).length;
     const stale = hasData && Date.now() - S.lastBackup > 14 * 864e5;
     return `
       ${stale ? `<div class="banner">Dein letztes Backup ist ${S.lastBackup ? "über 14 Tage alt" : "noch nicht gemacht"}. <button data-act="export">Jetzt sichern</button></div>` : ""}
       <h1>Training</h1>
-      ${cur ? `<a class="big primary" href="#/workout/${cur.id}">Training fortsetzen<small>${esc(planName(cur.plan))}, seit ${new Date(cur.start).toLocaleTimeString("de-AT", { hour: "2-digit", minute: "2-digit" })}</small></a>`
+      ${cur ? `<a class="big primary" href="#/workout/${cur.id}">Training fortsetzen<small>${esc(wName(cur))}, seit ${new Date(cur.start).toLocaleTimeString("de-AT", { hour: "2-digit", minute: "2-digit" })}</small></a>`
             : `<div class="stack">${plans}<button class="big ghost" data-act="start" data-id="">Freies Training</button></div>`}
       <h2>Verlauf</h2>
       ${hist || `<p class="muted">Noch keine Trainings. Dein erstes beendetes Training erscheint hier.</p>`}
@@ -91,7 +95,7 @@ const views = {
       </section>`;
     }).join("");
     return `
-      <h1>${esc(planName(w.plan))}<small>${fmtDay(w.start)}</small></h1>
+      <h1>${esc(wName(w))}<small>${fmtDay(w.start)}</small></h1>
       ${items || `<p class="muted">Füge die erste Übung hinzu.</p>`}
       <button class="add" data-act="pick" data-type="workout" data-id="${w.id}">Übung hinzufügen</button>
       ${live ? `<button class="big primary" data-act="finish" data-id="${w.id}">Training beenden<small>Nur abgehakte Sätze werden gespeichert</small></button>
@@ -130,7 +134,7 @@ const views = {
   },
 
   progress() {
-    const exs = [...new Set(finished().flatMap((w) => w.items.map((it) => it.ex)))];
+    const exs = [...new Set(finished().flatMap((w) => w.items.filter((it) => it.sets.length).map((it) => it.ex)))];
     const rows = exs.map((ex) => `<a class="row" href="#/ex/${encodeURIComponent(ex)}"><b>${esc(name(ex))}</b><span class="val">${num(bestE1rm(finished(), ex))}<small>kg 1RM</small></span></a>`).join("");
     return `<h1>Fortschritt</h1>${rows || `<p class="muted">Nach deinem ersten Training siehst du hier jede Übung mit ihrem geschätzten 1RM.</p>`}`;
   },
@@ -140,7 +144,7 @@ const views = {
     const ws = finished().filter((w) => w.items.some((it) => it.ex === ex && it.sets.length));
     const all = ws.flatMap((w) => w.items.filter((it) => it.ex === ex).flatMap((it) => it.sets));
     const heavy = all.reduce((a, s) => (s.w > (a?.w ?? -1) ? s : a), null);
-    const hist = ws.map((w) => `<a class="row" href="#/workout/${w.id}"><span>${fmtDay(w.start)}</span><span class="sets">${setsText(w.items.find((it) => it.ex === ex).sets)}</span></a>`).join("");
+    const hist = ws.map((w) => `<a class="row" href="#/workout/${w.id}"><span>${fmtDay(w.start)}</span><span class="sets">${setsText(w.items.filter((it) => it.ex === ex).flatMap((it) => it.sets))}</span></a>`).join("");
     return `<h1>${esc(name(ex))}<small>${esc(MUSCLE[ex] || "")}</small></h1>
       ${all.length ? `<div class="stats">
         <div><b>${num(bestE1rm(finished(), ex))}</b><span>kg geschätztes 1RM</span></div>
@@ -252,7 +256,7 @@ const cur = () => S.workouts.find((x) => x.id === route()[1]);
 const act = {
   start({ id }) {
     const p = S.plans.find((x) => x.id === id);
-    const w = { id: uid(), start: Date.now(), plan: id || null, done: false, items: (p?.items || []).map((it) => ({ ex: it.ex, sets: newSets(it.ex, it.sets) })) };
+    const w = { id: uid(), start: Date.now(), plan: id || null, planName: p?.name || "", done: false, items: (p?.items || []).map((it) => ({ ex: it.ex, sets: newSets(it.ex, it.sets) })) };
     S.workouts.push(w); save(); go(`#/workout/${w.id}`);
   },
   inc({ f, i, j, d }) {
@@ -266,11 +270,12 @@ const act = {
     if (!s.d) return;
     const prev = bestE1rm(S.workouts.filter((x) => x.done && x.id !== w.id), it.ex, it.sets.filter((x, k) => x.d && k !== +j));
     if (prev > 0 && e1rm(s.w, s.r) > prev) toast(`Neuer PR! ${name(it.ex)}: ${num(s.w)} kg × ${s.r}`);
-    timer.start(rest(it.ex));
+    if (rest(it.ex) > 0) timer.start(rest(it.ex));
   },
   addset({ i }) {
-    const w = cur(), sets = w.items[i].sets, l = sets.at(-1);
-    sets.push(w.done ? { w: l?.w ?? 0, r: l?.r ?? TARGET_REPS } : { w: l?.w ?? 0, r: l?.r ?? TARGET_REPS, d: false }); save(); render();
+    const w = cur(), it = w.items[i], l = it.sets.at(-1);
+    const s = { w: l?.w ?? suggest(lastSets(S.workouts.filter((x) => x.id !== w.id), it.ex), step(it.ex))?.w ?? 0, r: l?.r ?? TARGET_REPS };
+    it.sets.push(w.done ? s : { ...s, d: false }); save(); render();
   },
   delset({ i, j }) { cur().items[i].sets.splice(j, 1); save(); render(); },
   delitem({ i }) {
@@ -279,6 +284,8 @@ const act = {
   },
   finish({ id }) {
     const w = S.workouts.find((x) => x.id === id);
+    const open = w.items.reduce((a, it) => a + it.sets.filter((s) => !s.d).length, 0);
+    if (open && !confirm(`${open} ${open === 1 ? "Satz ist" : "Sätze sind"} nicht abgehakt und ${open === 1 ? "wird" : "werden"} verworfen. Training beenden?`)) return;
     w.items = w.items.map((it) => ({ ex: it.ex, sets: it.sets.filter((s) => s.d).map(({ w, r }) => ({ w, r })) })).filter((it) => it.sets.length);
     if (w.items.length) w.done = true; else S.workouts = S.workouts.filter((x) => x !== w);
     save(); timer.stop(); releaseWake();
@@ -287,7 +294,7 @@ const act = {
   },
   delworkout({ id }) {
     if (!confirm("Dieses Training löschen? Das lässt sich nicht rückgängig machen.")) return;
-    S.workouts = S.workouts.filter((x) => x.id !== id); save(); timer.stop(); go("#/train");
+    S.workouts = S.workouts.filter((x) => x.id !== id); save(); timer.stop(); releaseWake(); go("#/train");
   },
   newplan() { const p = { id: uid(), name: "Neuer Plan", items: [] }; S.plans.push(p); save(); go(`#/plan/${p.id}`); },
   psets({ i, d }) { const it = S.plans.find((p) => p.id === route()[1]).items[i]; it.sets = Math.max(1, it.sets + Number(d)); save(); render(); },
@@ -297,11 +304,14 @@ const act = {
     if (!confirm("Plan löschen? Deine Trainings bleiben erhalten.")) return;
     S.plans = S.plans.filter((p) => p.id !== id); save(); go("#/plans");
   },
-  pick({ type, id }) { pickFor = { type, id }; go("#/pick"); },
+  pick({ type, id }) { pickFor = ui.pickFor = { type, id }; saveUi(); go("#/pick"); },
   pickex({ ex }) {
     const { type, id } = pickFor;
-    if (type === "plan") S.plans.find((p) => p.id === id).items.push({ ex, sets: 3 });
-    else S.workouts.find((w) => w.id === id).items.push({ ex, sets: newSets(ex, 3).map((s) => (S.workouts.find((w) => w.id === id).done ? { w: s.w, r: s.r } : s)) });
+    const target = type === "plan" ? S.plans.find((p) => p.id === id) : S.workouts.find((w) => w.id === id);
+    if (!target) return go("#/train");
+    if (type === "plan") target.items.push({ ex, sets: 3 });
+    // finished workout: no sets yet, so nothing is logged that you did not enter
+    else target.items.push({ ex, sets: target.done ? [] : newSets(ex, 3) });
     save(); go(`#/${type}/${id}`);
   },
   custom() {
@@ -324,7 +334,8 @@ function unlockAudio() {
   } catch {}
 }
 function beep() {
-  if (!audio) return;
+  // A suspended/interrupted context (after lock or app switch) would play the beeps later, at the next tap.
+  if (!audio || audio.state !== "running") return;
   [0, 0.35, 0.7].forEach((t) => {
     const o = audio.createOscillator(), g = audio.createGain();
     o.frequency.value = 880; g.gain.setValueAtTime(0.4, audio.currentTime + t); g.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + t + 0.25);
@@ -333,9 +344,11 @@ function beep() {
 }
 const timer = {
   end: 0, iv: 0,
-  start(sec) { this.end = Date.now() + sec * 1000; clearInterval(this.iv); this.iv = setInterval(() => this.tick(), 250); this.tick(); },
-  add(sec) { this.end += sec * 1000; this.tick(); },
-  stop() { clearInterval(this.iv); this.end = 0; $("#timer").hidden = true; },
+  run() { clearInterval(this.iv); this.iv = setInterval(() => this.tick(), 250); this.tick(); },
+  start(sec) { this.end = Date.now() + sec * 1000; this.keep(); this.run(); },
+  add(sec) { this.end += sec * 1000; this.keep(); this.tick(); },
+  stop() { clearInterval(this.iv); this.end = 0; this.keep(); $("#timer").hidden = true; },
+  keep() { ui.timerEnd = this.end; saveUi(); },
   left() { return Math.max(0, Math.ceil((this.end - Date.now()) / 1000)); },
   tick() {
     const s = this.left(), el = $("#timer");
@@ -356,20 +369,32 @@ $("#timer").addEventListener("click", (e) => {
   if (t === "stop") timer.stop(); else if (t) timer.add(Number(t));
 });
 
-// keep screen on during a workout
-let wake;
+// keep screen on while a running workout is open
+let wake = null, waking = false;
 async function keepAwake() {
-  try { if ("wakeLock" in navigator && !wake) { wake = await navigator.wakeLock.request("screen"); wake.addEventListener("release", () => (wake = null)); } } catch {}
+  if (wake || waking || !("wakeLock" in navigator)) return;
+  waking = true;
+  try { wake = await navigator.wakeLock.request("screen"); wake.addEventListener("release", () => (wake = null)); } catch {}
+  waking = false;
 }
 function releaseWake() { wake?.release(); wake = null; }
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && route()[0] === "workout" && cur() && !cur().done) keepAwake(); if (document.visibilityState === "visible" && timer.end) timer.tick(); });
+const liveView = () => route()[0] === "workout" && cur() && !cur().done;
+let renderedDay = today();
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  audio?.resume().catch(() => {});
+  if (liveView()) keepAwake();
+  if (timer.end) timer.tick();
+  // a new day since the last render: refresh dates (e.g. the weigh-in form), unless you are typing
+  if (today() !== renderedDay && !document.activeElement?.matches("input")) render();
+});
 
 // ---------- backup ----------
 async function exportBackup() {
   const file = new File([JSON.stringify(S)], `gym-backup-${today()}.json`, { type: "application/json" });
   try {
     if (navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file] });
-    else { const a = document.createElement("a"); a.href = URL.createObjectURL(file); a.download = file.name; a.click(); URL.revokeObjectURL(a.href); }
+    else { const a = document.createElement("a"); a.href = URL.createObjectURL(file); a.download = file.name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 10000); }
     S.lastBackup = Date.now(); save(); render(); toast("Backup erstellt");
   } catch (e) { if (e.name !== "AbortError") toast("Backup fehlgeschlagen: " + e.message); }
 }
@@ -377,10 +402,12 @@ $("#importFile").addEventListener("change", async (e) => {
   const f = e.target.files[0]; e.target.value = "";
   if (!f) return;
   try {
-    const d = JSON.parse(await f.text());
-    if (!Array.isArray(d.workouts) || !Array.isArray(d.plans) || typeof d.body !== "object") throw new Error("Das ist keine Gym-Backup-Datei.");
+    const raw = JSON.parse(await f.text());
+    if (!raw || !Array.isArray(raw.workouts) || !Array.isArray(raw.plans)) throw new Error("Das ist keine Gym-Backup-Datei.");
+    const d = normalize(raw);
     if (!confirm(`Backup mit ${d.workouts.length} Trainings laden? Die aktuellen Daten auf diesem iPhone werden ersetzt.`)) return;
-    S = { ...BLANK(), ...d }; for (const c of S.custom) MUSCLE[c] = "eigene";
+    d.lastBackup = Date.now(); // this file is a backup, so you are covered as of now
+    S = d; for (const c of S.custom) MUSCLE[c] = "eigene";
     save(); toast("Backup geladen"); go("#/train");
   } catch (err) { toast("Import fehlgeschlagen: " + err.message); }
 });
@@ -392,13 +419,15 @@ document.addEventListener("click", (e) => {
   const fig = e.target.closest(".chart");
   if (fig) chartTap(fig, e.clientX);
 });
+// Store typed set values on every keystroke, so nothing is lost if iOS never blurs the field.
+function setNum(t) {
+  const n = parseFloat(t.value.replace(",", "."));
+  const s = cur()?.items[t.dataset.i]?.sets[t.dataset.j];
+  if (s) { s[t.dataset.f] = Number.isFinite(n) && n >= 0 ? n : 0; save(); }
+}
 document.addEventListener("change", (e) => {
   const t = e.target, v = t.value.replace(",", ".");
-  if (t.classList.contains("num")) {
-    const n = parseFloat(v);
-    cur().items[t.dataset.i].sets[t.dataset.j][t.dataset.f] = Number.isFinite(n) && n >= 0 ? n : 0;
-    save(); return;
-  }
+  if (t.classList.contains("num")) return setNum(t);
   const a = t.dataset.act, ex = t.dataset.ex;
   if (a === "pname") S.plans.find((p) => p.id === route()[1]).name = t.value.trim() || "Plan";
   else if (a === "oname") S.opts[ex] = { ...S.opts[ex], name: t.value.trim() || undefined };
@@ -407,7 +436,10 @@ document.addEventListener("change", (e) => {
   else return;
   save();
 });
-document.addEventListener("input", (e) => { if (e.target.id === "q") $("#picklist").innerHTML = pickList(e.target.value); });
+document.addEventListener("input", (e) => {
+  if (e.target.id === "q") $("#picklist").innerHTML = pickList(e.target.value);
+  else if (e.target.classList.contains("num")) setNum(e.target);
+});
 document.addEventListener("submit", (e) => {
   e.preventDefault();
   const f = new FormData(e.target), y = parseFloat(String(f.get("y")).replace(",", "."));
@@ -421,13 +453,22 @@ function go(h) { if (location.hash === h) render(); else location.hash = h; }
 const TAB = { train: "train", workout: "train", plans: "plans", plan: "plans", pick: "plans", progress: "progress", ex: "progress", body: "body" };
 function render() {
   const [v, arg] = route();
-  $("#view").innerHTML = (views[v] || views.train)(arg);
+  renderedDay = today();
+  try {
+    $("#view").innerHTML = (views[v] || views.train)(arg);
+  } catch (err) {
+    // never leave a blank screen: backup buttons stay reachable
+    $("#view").innerHTML = `<h1>Fehler</h1><p class="muted">Diese Ansicht konnte nicht angezeigt werden (${esc(err.message)}). Sichere deine Daten oder lade ein Backup.</p>
+      <div class="pair"><button data-act="export">Backup exportieren</button><button data-act="import">Backup importieren</button></div>
+      <a class="big ghost" href="#/train">Zur Startseite</a>`;
+  }
   for (const a of document.querySelectorAll("#tabs a")) a.toggleAttribute("aria-current", a.dataset.tab === (TAB[v] || "train"));
-  if (v === "workout" && cur() && !cur().done) keepAwake();
+  if (liveView()) keepAwake(); else releaseWake();
   if (v === "pick") $("#q")?.focus();
 }
 let lastView;
 addEventListener("hashchange", () => { const v = route()[0]; render(); if (v !== lastView) scrollTo(0, 0); lastView = v; });
 render();
+if (ui.timerEnd > Date.now()) { timer.end = ui.timerEnd; timer.run(); } // resume a pause after iOS reloaded the app
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
